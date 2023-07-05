@@ -1,20 +1,17 @@
 import React, { useState, useRef } from "react";
 import cv from "@techstark/opencv-js";
 import { Tensor, InferenceSession } from "onnxruntime-web";
-import Loader from "./components/loader";
-import { detectImage } from "./utils/detect";
-import "./style/App.css";
+import { detectImage,detectVideo } from "./utils/detect";
+import "./style/style.css";
 
 const App = () => {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState("Loading OpenCV.js...");
-  const [image, setImage] = useState(null);
-  const inputImage = useRef(null);
-  const imageRef = useRef(null);
+  const cameraRef = useRef(null);
   const canvasRef = useRef(null);
 
   // Configs
-  const modelName = "yolov5n-seg.onnx";
+  const modelName = "best.onnx";
   const modelInputShape = [1, 3, 640, 640];
   const topk = 100;
   const iouThreshold = 0.4;
@@ -43,87 +40,39 @@ const App = () => {
     setSession({ net: yolov5, nms: nms, mask: mask });
     setLoading(null);
   };
-
+  
+  let promiseToUseCamera = navigator.mediaDevices.getUserMedia({
+    video: {facingMode: 'environment'},
+    audio: false,
+  });
+  
+  promiseToUseCamera
+    .then(function (mediaStream) {
+      cameraRef.current.srcObject = mediaStream;
+    })
+    .catch(function () {
+      console.log("permission to access has been denied by the user");
+    });
   return (
     <div className="App">
-      {loading && <Loader>{loading}</Loader>}
-      <div className="header">
-        <h1>YOLOv5 Object Segmentation App</h1>
-        <p>
-          YOLOv5 object segmentation application live on browser powered by{" "}
-          <code>onnxruntime-web</code>
-        </p>
-        <p>
-          Serving : <code className="code">{modelName}</code>
-        </p>
-      </div>
-
-      <div className="content">
-        <img
-          ref={imageRef}
-          src="#"
-          alt=""
-          style={{ display: image ? "block" : "none" }}
-          onLoad={() => {
-            detectImage(
-              imageRef.current,
-              canvasRef.current,
-              session,
-              topk,
-              iouThreshold,
-              confThreshold,
-              classThreshold,
-              modelInputShape
-            );
-          }}
-        />
-        <canvas
+    <div className="content">
+        <video autoPlay ref={cameraRef}
+                    onPlay={() => detectVideo(              
+                      cameraRef.current,
+                      canvasRef.current,
+                      session,
+                      topk,
+                      iouThreshold,
+                      confThreshold,
+                      classThreshold,
+                      modelInputShape)} id= {"temp"} />
+     <canvas
           id="canvas"
           width={modelInputShape[2]}
           height={modelInputShape[3]}
           ref={canvasRef}
         />
-      </div>
-
-      <input
-        type="file"
-        ref={inputImage}
-        accept="image/*"
-        style={{ display: "none" }}
-        onChange={(e) => {
-          // handle next image to detect
-          if (image) {
-            URL.revokeObjectURL(image);
-            setImage(null);
-          }
-
-          const url = URL.createObjectURL(e.target.files[0]); // create image url
-          imageRef.current.src = url; // set image source
-          setImage(url);
-        }}
-      />
-      <div className="btn-container">
-        <button
-          onClick={() => {
-            inputImage.current.click();
-          }}
-        >
-          Open local image
-        </button>
-        {image && (
-          /* show close btn when there is image */
-          <button
-            onClick={() => {
-              inputImage.current.value = "";
-              imageRef.current.src = "#";
-              URL.revokeObjectURL(image);
-              setImage(null);
-            }}
-          >
-            Close image
-          </button>
-        )}
-      </div>
+    </div>
     </div>
   );
 };

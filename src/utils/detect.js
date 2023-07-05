@@ -48,7 +48,7 @@ export const detectImage = async (
 
     const data = output0.data.slice(idx * output0.dims[2], (idx + 1) * output0.dims[2]); // get rows
     let box = data.slice(0, 4);
-    const confidence = data[4]; // detection confidence
+    const confidence    = data[4]; // detection confidence
     const scores = data.slice(5, 5 + numClass); // classes probability scores
     let score = Math.max(...scores); // maximum probability scores
     const label = scores.indexOf(score); // class id of maximum probability scores
@@ -202,4 +202,160 @@ const overflowBoxes = (box, maxSize) => {
   box[2] = box[0] + box[2] <= maxSize ? box[2] : maxSize - box[0];
   box[3] = box[1] + box[3] <= maxSize ? box[3] : maxSize - box[1];
   return box;
+};
+
+
+const preprocessing_video = (source, modelWidth, modelHeight, stride = 32) => {
+  source.height = source.videoHeight;
+  source.width = source.videoWidth;
+  const cap = new cv.VideoCapture(source); // read from video tag
+  const mat = new cv.Mat(source.videoHeight, source.videoWidth, cv.CV_8UC4);
+  cap.read(mat);
+  const matC3 = new cv.Mat(mat.rows, mat.cols, cv.CV_8UC3); // new image matrix
+  cv.cvtColor(mat, matC3, cv.COLOR_RGBA2BGR); // RGBA to BGR
+
+  const [w, h] = divStride(stride, matC3.cols, matC3.rows);
+  cv.resize(matC3, matC3, new cv.Size(w, h));
+
+  // padding image to [n x n] dim
+  const maxSize = Math.max(matC3.rows, matC3.cols); // get max size from width and height
+  const xPad = maxSize - matC3.cols, // set xPadding
+    xRatio = maxSize / matC3.cols; // set xRatio
+  const yPad = maxSize - matC3.rows, // set yPadding
+    yRatio = maxSize / matC3.rows; // set yRatio
+  const matPad = new cv.Mat(); // new mat for padded image
+  cv.copyMakeBorder(matC3, matPad, 0, yPad, 0, xPad, cv.BORDER_CONSTANT, [0, 0, 0, 255]); // padding black
+
+  const input = cv.blobFromImage(
+    matPad,
+    1 / 255.0, // normalize
+    new cv.Size(modelWidth, modelHeight), // resize to model input size
+    new cv.Scalar(0, 0, 0),
+    true, // swapRB
+    false // crop
+  ); // preprocessing image matrix
+
+  // release mat opencv
+  mat.delete();
+  matC3.delete();
+  matPad.delete();
+
+  return [input, xRatio, yRatio];
+};
+export const detectVideo = async (
+  vidSource,
+  canvas,
+  session,
+  topk,
+  iouThreshold,
+  confThreshold,
+  classThreshold,
+  inputShape
+)  => {
+
+  /**
+   * Function to detect every frame from video
+   */
+  const detectFrame = async () => {
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height); // clean canvas
+
+    const [modelWidth, modelHeight] = inputShape.slice(2);
+    const maxSize = Math.max(modelWidth, modelHeight);
+    const [input, xRatio, yRatio] = preprocessing_video(vidSource, modelWidth, modelHeight);
+    const tensor = new Tensor("float32", input.data32F, inputShape); // to ort.Tensor
+    const config = new Tensor("float32", new Float32Array([topk, iouThreshold, confThreshold])); // nms config tensor
+    const { output0, output1 } = await session.net.run({ images: tensor }); // run session and get output layer
+    const { selected_idx } = await session.nms.run({ detection: output0, config: config }); // get selected idx from nms
+  
+    const boxes = [];
+    const overlay = cv.Mat.zeros(modelHeight, modelWidth, cv.CV_8UC4);
+  
+    // looping through output
+    for (let idx = 0; idx < output0.dims[1]; idx++) {
+      if (!selected_idx.data.includes(idx)) continue; // skip if index isn't selected
+  
+      const data = output0.data.slice(idx * output0.dims[2], (idx + 1) * output0.dims[2]); // get rows
+      let box = data.slice(0, 4);
+      const confidence = data[4]; // detection confidence
+      const scores = data.slice(5, 5 + numClass); // classes probability scores
+      let score = Math.max(...scores); // maximum probability scores
+      const label = scores.indexOf(score); // class id of maximum probability scores
+      score *= confidence; // multiply score by conf
+      const color = colors.get(label); // get color
+  
+      // filtering by score thresholds
+      if (score >= classThreshold) {
+        box = overflowBoxes(
+          [
+            box[0] - 0.5 * box[2], // before upscale x
+            box[1] - 0.5 * box[3], // before upscale y
+            box[2], // before upscale w
+            box[3], // before upscale h
+          ],
+          maxSize
+        ); // keep boxes in maxSize range
+  
+        const [x, y, w, h] = overflowBoxes(
+          [
+            Math.floor(box[0] * xRatio), // upscale left
+            Math.floor(box[1] * yRatio), // upscale top
+            Math.floor(box[2] * xRatio), // upscale width
+            Math.floor(box[3] * yRatio), // upscale height
+          ],
+          maxSize
+        ); // keep boxes in maxSize range
+  
+        boxes.push({
+          label: labels[label],
+          probability: score,
+          color: color,
+          bounding: [x, y, w, h], // upscale box
+        }); // update boxes to draw later
+  
+        const mask = new Tensor(
+          "float32",
+          new Float32Array([
+            ...box, // original scale box
+            ...data.slice(5 + numClass), // mask data
+          ])
+        ); // mask input
+        const maskConfig = new Tensor(
+          "float32",
+          new Float32Array([
+            maxSize,
+            x, // upscale x
+            y, // upscale y
+            w, // upscale width
+            h, // upscale height
+            ...Colors.hexToRgba(color, 120), // color in RGBA
+          ])
+        ); // mask config
+        const { mask_filter } = await session.mask.run({
+          detection: mask,
+          mask: output1,
+          config: maskConfig,
+        }); // get mask
+  
+        const mask_mat = cv.matFromArray(
+          mask_filter.dims[0],
+          mask_filter.dims[1],
+          cv.CV_8UC4,
+          mask_filter.data
+        ); // mask result to Mat
+  
+        cv.addWeighted(overlay, 1, mask_mat, 1, 0, overlay); // Update mask overlay
+        mask_mat.delete(); // delete unused Mat
+      }
+    }
+    const mask_img = new ImageData(new Uint8ClampedArray(overlay.data), overlay.cols, overlay.rows); // create image data from mask overlay
+    ctx.putImageData(mask_img, 0, 0); // put ImageData data to canvas
+    renderBoxes(ctx, boxes); // Draw boxes
+    input.delete(); // delete unused Mat
+    overlay.delete(); // delete unused Mat
+    requestAnimationFrame(detectFrame); // get another frame
+  
+  };
+
+  detectFrame(); // initialize to detect every frame
 };
